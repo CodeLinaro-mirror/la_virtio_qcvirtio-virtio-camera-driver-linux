@@ -17,7 +17,7 @@
 static bool mplane_api = false;
 module_param(mplane_api, bool, 0644);
 MODULE_PARM_DESC(mplane_api,
-	"0 (default) - single planar API, 1 - multiplanar API");
+		 "0 (default) - single planar API, 1 - multiplanar API");
 
 static int virtio_camera_probe(struct virtio_device *vdev)
 {
@@ -27,11 +27,16 @@ static int virtio_camera_probe(struct virtio_device *vdev)
 	struct device *pdev = dev->parent;
 
 	struct virtqueue *vqs[2];
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+	struct virtqueue_info vqs_info[] = {
+		{ "cmd_vq", virtio_camera_cmd_cb },
+		{ "event_vq", virtio_camera_event_cb },
+	};
+#else
 	static const char *const names[] = { "cmd_vq", "event_vq" };
 	static vq_callback_t *callbacks[] = { virtio_camera_cmd_cb,
 					      virtio_camera_event_cb };
-
+#endif
 	dev_dbg(dev, "%s()\n", __func__);
 
 	vcd = devm_kzalloc(dev, sizeof(*vcd), GFP_KERNEL);
@@ -41,7 +46,7 @@ static int virtio_camera_probe(struct virtio_device *vdev)
 	vcd->vdev = vdev;
 	vdev->priv = vcd;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
 	vcd->has_iommu = !virtio_has_dma_quirk(vdev);
 #else
 	vcd->has_iommu = !virtio_has_iommu_quirk(vdev);
@@ -77,7 +82,11 @@ static int virtio_camera_probe(struct virtio_device *vdev)
 	if (ret)
 		goto error;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+	ret = virtio_find_vqs(vdev, 2, vqs, vqs_info, NULL);
+#else
 	ret = virtio_find_vqs(vdev, 2, vqs, callbacks, names, NULL);
+#endif
 	if (ret) {
 		v4l2_err(&vcd->v4l2_dev, "failed to find virt queues\n");
 		goto error;

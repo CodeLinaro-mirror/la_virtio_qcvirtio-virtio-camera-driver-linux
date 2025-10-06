@@ -16,8 +16,8 @@ static void virtio_camera_clean_ctrl(struct virtio_camera_device *vcd)
 {
 	struct v4l2_ctrl *v4l2_ctrl, *next_v4l2_ctrl;
 
-	list_for_each_entry_safe (v4l2_ctrl, next_v4l2_ctrl,
-				  &vcd->ctrls.hdl.ctrls, node) {
+	list_for_each_entry_safe(v4l2_ctrl, next_v4l2_ctrl,
+				 &vcd->ctrls.hdl.ctrls, node) {
 		kfree(v4l2_ctrl->priv);
 	}
 	v4l2_ctrl_handler_free(&vcd->ctrls.hdl);
@@ -37,8 +37,8 @@ static void virtio_camera_clean(struct virtio_camera_device *vcd)
 	struct virtio_camera_stream *stream, *tmp_stream;
 
 	virtio_camera_clean_ctrl(vcd);
-	list_for_each_entry_safe (stream, tmp_stream,
-				  &vcd->camera_sensor.streams_list, list) {
+	list_for_each_entry_safe(stream, tmp_stream,
+				 &vcd->camera_sensor.streams_list, list) {
 		virtio_camera_clean_stream_fmt(stream);
 		list_del(&stream->list);
 		kfree(stream);
@@ -63,7 +63,8 @@ static int virtio_camera_device_open(struct file *file)
 
 	//TODO: Add multistream support.
 	vfh->stream = list_first_entry_or_null(&vcd->camera_sensor.streams_list,
-					  struct virtio_camera_stream, list);
+					       struct virtio_camera_stream,
+					       list);
 	if (!vfh->stream) {
 		v4l2_err(&vcd->v4l2_dev, "Could not find available stream");
 		ret = -ENOENT;
@@ -87,7 +88,8 @@ static int virtio_camera_device_release(struct file *file)
 {
 	struct virtio_camera_device *vcd = video_drvdata(file);
 	struct video_device *video_dev = video_devdata(file);
-	struct virtio_camera_fh *vfh = container_of(file->private_data, struct virtio_camera_fh, fh);
+	struct virtio_camera_fh *vfh =
+		container_of(file->private_data, struct virtio_camera_fh, fh);
 
 	mutex_lock(video_dev->lock);
 
@@ -136,7 +138,7 @@ int virtio_camera_device_init(struct virtio_camera_device *vcd)
 		return ret;
 	}
 
-	list_for_each_entry (stream, &vcd->camera_sensor.streams_list, list) {
+	list_for_each_entry(stream, &vcd->camera_sensor.streams_list, list) {
 		/* Create a stream. The function/command only effective purpose
 		 * now is to get stream's format info size for
 		 * virtio_camera_cmd_stream_create(). Its purpose will expand

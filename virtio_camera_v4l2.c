@@ -70,8 +70,7 @@ static void virtio_camera_vb2_cancel_bufs(struct virtio_camera_device *vcd)
 	struct virtio_camera_buffer *buf;
 
 	spin_lock_irqsave(&vcd->vbq_lock, flags);
-	while (!list_empty(&vcd->vbq_active))
-	{
+	while (!list_empty(&vcd->vbq_active)) {
 		buf = list_first_entry(&vcd->vbq_active,
 				       struct virtio_camera_buffer, list);
 		list_del(&buf->list);
@@ -514,8 +513,8 @@ build_virtio_camera_sglist(struct virtio_camera_resource_sg_list *sgl,
 	for_each_sg(sgt->sgl, sg, sgt->nents, i) {
 		sgl->entries[i].addr = cpu_to_le64(
 			has_iommu ? sg_dma_address(sg) : sg_phys(sg));
-		sgl->entries[i].length = cpu_to_le32(
-			has_iommu ? sg_dma_len(sg) : sg->length);
+		sgl->entries[i].length =
+			cpu_to_le32(has_iommu ? sg_dma_len(sg) : sg->length);
 	}
 
 	sgl->num_entries = sgt->nents;
@@ -682,7 +681,11 @@ int virtio_camera_vb2_queue_init(struct virtio_camera_device *vcd,
 	q->ops = &virtio_camera_vb2_ops;
 	q->mem_ops = &vb2_dma_sg_memops;
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+	q->min_queued_buffers = vcd->camera_sensor.min_buf_needed;
+#else
 	q->min_buffers_needed = vcd->camera_sensor.min_buf_needed;
+#endif
 	q->lock = &vcd->video_dev_mutex;
 	q->dev = vcd->v4l2_dev.dev;
 	q->gfp_flags = GFP_DMA;

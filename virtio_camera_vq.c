@@ -8,8 +8,8 @@
 
 #define MAX_INLINE_CMD_SIZE 96
 #define MAX_INLINE_RESP_SIZE 96
-#define VBUFFER_SIZE                                                           \
-	(sizeof(struct virtio_camera_vbuffer) + MAX_INLINE_CMD_SIZE +          \
+#define VBUFFER_SIZE                                                  \
+	(sizeof(struct virtio_camera_vbuffer) + MAX_INLINE_CMD_SIZE + \
 	 MAX_INLINE_RESP_SIZE)
 
 static void fmt_virtio_to_v4l2(struct virtio_camera_device *vcd,
@@ -21,7 +21,7 @@ static bool virtio_camera_vbuf_is_pending(struct virtio_camera_device *vcd,
 {
 	struct virtio_camera_vbuffer *entry;
 
-	list_for_each_entry (entry, &vcd->pending_vbuf_list, pending_list) {
+	list_for_each_entry(entry, &vcd->pending_vbuf_list, pending_list) {
 		if (entry == vbuf)
 			return true;
 	}
@@ -65,7 +65,7 @@ static void virtio_camera_detach_vbufs(struct virtio_camera_device *vcd)
 	if (list_empty(&detach_list))
 		return;
 
-	list_for_each_entry_safe (vbuf, tmp_vbuf, &detach_list, list) {
+	list_for_each_entry_safe(vbuf, tmp_vbuf, &detach_list, list) {
 		list_del(&vbuf->list);
 		virtio_camera_free_vbuf(vcd, vbuf);
 	}
@@ -73,10 +73,9 @@ static void virtio_camera_detach_vbufs(struct virtio_camera_device *vcd)
 
 int virtio_camera_alloc_vbufs(struct virtio_camera_device *vcd)
 {
-	vcd->vbufs =
-		kmem_cache_create("virtio-camera-vbufs", VBUFFER_SIZE,
-				  __alignof__(struct virtio_camera_vbuffer), 0,
-				  NULL);
+	vcd->vbufs = kmem_cache_create(
+		"virtio-camera-vbufs", VBUFFER_SIZE,
+		__alignof__(struct virtio_camera_vbuffer), 0, NULL);
 	if (!vcd->vbufs)
 		return -ENOMEM;
 
@@ -399,7 +398,7 @@ int virtio_camera_cmd_enum_camera_ctrls(struct virtio_camera_device *vcd)
 	v4l2_ctrl_handler_init(&vcd->ctrls.hdl, nctrl_info);
 
 	for (i = 0; i < nctrl_info; ++i) {
-		struct v4l2_ctrl_config cfg = {0};
+		struct v4l2_ctrl_config cfg = { 0 };
 		struct virtio_camera_ctrl_entry *ctrl_entry =
 			(struct virtio_camera_ctrl_entry
 				 *)((char *)resp +
@@ -449,8 +448,8 @@ int virtio_camera_cmd_enum_camera_ctrls(struct virtio_camera_device *vcd)
 	return 0;
 
 error_ctrl_hdl:
-	list_for_each_entry_safe (v4l2_ctrl, next_v4l2_ctrl,
-				  &vcd->ctrls.hdl.ctrls, node) {
+	list_for_each_entry_safe(v4l2_ctrl, next_v4l2_ctrl,
+				 &vcd->ctrls.hdl.ctrls, node) {
 		kfree(v4l2_ctrl->priv);
 	}
 	v4l2_ctrl_handler_free(&vcd->ctrls.hdl);
@@ -593,7 +592,8 @@ static int virtio_camera_cmd_get_stream_formats_done(
 		return -EINVAL;
 	}
 
-	stream->formats = kcalloc(fmt_count, sizeof(*stream->formats), GFP_KERNEL);
+	stream->formats =
+		kcalloc(fmt_count, sizeof(*stream->formats), GFP_KERNEL);
 	if (!stream->formats) {
 		return -ENOMEM;
 	}
@@ -761,8 +761,9 @@ int virtio_camera_cmd_resource_create(struct virtio_camera_device *vcd,
 }
 
 /* VIRTIO_CAMERA_CMD_RESOURCE_QUEUE */
-void virtio_camera_cmd_resource_queue_cb(struct virtio_camera_device *vcd,
-					 struct virtio_camera_vbuffer *vbuf)
+static void
+virtio_camera_cmd_resource_queue_cb(struct virtio_camera_device *vcd,
+				    struct virtio_camera_vbuffer *vbuf)
 {
 	struct virtio_camera_resource_queue_resp *resp =
 		(struct virtio_camera_resource_queue_resp *)vbuf->resp_buf;

@@ -7,9 +7,9 @@
 #ifndef _VIRTIO_CAMERA_H
 #define _VIRTIO_CAMERA_H
 
+#include "include/uapi/linux/virtio_camera.h"
 #include <linux/list.h>
 #include <linux/virtio.h>
-#include <linux/virtio_camera.h>
 #include <media/videobuf2-dma-contig.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ctrls.h>
@@ -22,7 +22,7 @@
 #define VIRTIO_CAMERA_DEFAULT_CS V4L2_COLORSPACE_SRGB
 #define VIRTIO_CAMERA_DEFAULT_XFER_F V4L2_XFER_FUNC_SRGB
 
-#define file2stream(file)                                                      \
+#define file2stream(file) \
 	container_of(file->private_data, struct virtio_camera_fh, fh)->stream
 
 struct virtio_camera_device;
