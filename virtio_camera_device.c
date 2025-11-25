@@ -9,43 +9,6 @@
 #include <media/v4l2-ioctl.h>
 
 /*
- * Helper sunctions
- */
-
-static void virtio_camera_clean_ctrl(struct virtio_camera_device *vcd)
-{
-	struct v4l2_ctrl *v4l2_ctrl, *next_v4l2_ctrl;
-
-	list_for_each_entry_safe(v4l2_ctrl, next_v4l2_ctrl,
-				 &vcd->ctrls.hdl.ctrls, node) {
-		kfree(v4l2_ctrl->priv);
-	}
-	v4l2_ctrl_handler_free(&vcd->ctrls.hdl);
-}
-
-static void virtio_camera_clean_stream_fmt(struct virtio_camera_stream *stream)
-{
-	unsigned int i = 0;
-	for (i = 0; i < stream->nformats; i++) {
-		kfree(stream->formats[i].frames);
-	}
-	kfree(stream->formats);
-}
-
-static void virtio_camera_clean(struct virtio_camera_device *vcd)
-{
-	struct virtio_camera_stream *stream, *tmp_stream;
-
-	virtio_camera_clean_ctrl(vcd);
-	list_for_each_entry_safe(stream, tmp_stream,
-				 &vcd->camera_sensor.streams_list, list) {
-		virtio_camera_clean_stream_fmt(stream);
-		list_del(&stream->list);
-		kfree(stream);
-	}
-}
-
-/*
  * Device ops
  */
 
@@ -54,22 +17,13 @@ static int virtio_camera_device_open(struct file *file)
 	struct virtio_camera_device *vcd = video_drvdata(file);
 	struct video_device *video_dev = video_devdata(file);
 	struct virtio_camera_fh *vfh;
-	int ret;
 
 	vfh = kzalloc(sizeof(*vfh), GFP_KERNEL);
 	if (vfh == NULL) {
 		return -ENOMEM;
 	}
 
-	//TODO: Add multistream support.
-	vfh->stream = list_first_entry_or_null(&vcd->camera_sensor.streams_list,
-					       struct virtio_camera_stream,
-					       list);
-	if (!vfh->stream) {
-		v4l2_err(&vcd->v4l2_dev, "Could not find available stream");
-		ret = -ENOENT;
-		goto error;
-	}
+	vfh->stream = &vcd->camera_sensor.stream;
 
 	mutex_lock(video_dev->lock);
 	v4l2_fh_init(&vfh->fh, video_dev);
@@ -78,10 +32,6 @@ static int virtio_camera_device_open(struct file *file)
 	mutex_unlock(video_dev->lock);
 
 	return 0;
-
-error:
-	kfree(vfh);
-	return ret;
 }
 
 static int virtio_camera_device_release(struct file *file)
@@ -119,9 +69,10 @@ int virtio_camera_device_init(struct virtio_camera_device *vcd)
 {
 	int ret;
 	struct video_device *vd = &vcd->video_dev;
-	struct virtio_camera_stream *stream;
+	struct v4l2_ctrl *v4l2_ctrl, *next_v4l2_ctrl;
 
-	INIT_LIST_HEAD(&vcd->camera_sensor.streams_list);
+	struct virtio_camera_stream *stream = &vcd->camera_sensor.stream;
+
 	spin_lock_init(&vcd->resource_idr_lock);
 	idr_init(&vcd->resource_idr);
 
@@ -138,36 +89,33 @@ int virtio_camera_device_init(struct virtio_camera_device *vcd)
 		return ret;
 	}
 
-	list_for_each_entry(stream, &vcd->camera_sensor.streams_list, list) {
-		/* Create a stream. The function/command only effective purpose
-		 * now is to get stream's format info size for
-		 * virtio_camera_cmd_stream_create(). Its purpose will expand
-		 * in future.
-		 *
-		 * STREAM_DESTROY counterpart is left undone since it doesn't
-		 * have much of use without multistreaming support feature
-		 * clearly defined and implemented. */
-		ret = virtio_camera_cmd_stream_create(vcd, stream);
-		if (ret < 0) {
-			v4l2_err(&vcd->v4l2_dev, "failed to create stream\n");
-			goto error;
-		}
-
-		/* Fetch all available stream formats and get current stream format */
-		ret = virtio_camera_cmd_get_stream_formats(vcd, stream);
-		if (ret < 0) {
-			v4l2_err(&vcd->v4l2_dev,
-				 "failed to get stream formats");
-			goto error;
-		}
-
-		ret = virtio_camera_vb2_queue_init(vcd, stream);
-		if (ret < 0) {
-			v4l2_err(&vcd->v4l2_dev, "failed to init vb2_queue");
-			goto error;
-		}
-		vd->queue = &vcd->vb_q;
+	/* Create a stream. The function/command only effective purpose
+	 * now is to get stream's format info size for
+	 * virtio_camera_cmd_stream_create(). Its purpose will expand
+	 * in future.
+	 *
+	 * STREAM_DESTROY counterpart is left undone since it doesn't
+	 * have much of use without multistreaming support feature
+	 * clearly defined and implemented. */
+	ret = virtio_camera_cmd_stream_create(vcd, stream);
+	if (ret < 0) {
+		v4l2_err(&vcd->v4l2_dev, "failed to create stream\n");
+		goto err_stream_create;
 	}
+
+	/* Fetch all available stream formats and get current stream format */
+	ret = virtio_camera_cmd_get_stream_formats(vcd, stream);
+	if (ret < 0) {
+		v4l2_err(&vcd->v4l2_dev, "failed to get stream formats");
+		goto err_stream_create;
+	}
+
+	ret = virtio_camera_vb2_queue_init(vcd, stream);
+	if (ret < 0) {
+		v4l2_err(&vcd->v4l2_dev, "failed to init vb2_queue");
+		goto err_vb2_init;
+	}
+	vd->queue = &vcd->vb_q;
 
 	/* Initialize video_device */
 	INIT_LIST_HEAD(&vcd->vbq_active);
@@ -200,24 +148,44 @@ int virtio_camera_device_init(struct virtio_camera_device *vcd)
 #endif
 	if (ret) {
 		v4l2_err(&vcd->v4l2_dev, "Failed to register video device");
-		goto error;
+		goto err_register;
 	}
 
 	dev_info(&vcd->vdev->dev, "Register '%s' as /dev/video%d", vd->name,
 		 vd->num);
 	return 0;
 
-error:
-	virtio_camera_clean(vcd);
+err_register:
+	virtio_camera_vb2_queue_deinit(vcd);
+err_vb2_init:
+	while (stream->nformats--)
+		kfree(stream->formats[stream->nformats].frames);
+	kfree(stream->formats);
+err_stream_create:
+	list_for_each_entry_safe(v4l2_ctrl, next_v4l2_ctrl,
+				 &vcd->ctrls.hdl.ctrls, node) {
+		kfree(v4l2_ctrl->priv);
+	}
+	v4l2_ctrl_handler_free(&vcd->ctrls.hdl);
 	return ret;
 }
 
-int virtio_camera_device_deinit(struct virtio_camera_device *vcd)
+void virtio_camera_device_deinit(struct virtio_camera_device *vcd)
 {
-	struct video_device *vd = &vcd->video_dev;
+	struct v4l2_ctrl *v4l2_ctrl, *next_v4l2_ctrl;
+	struct virtio_camera_stream *stream = &vcd->camera_sensor.stream;
 
-	video_unregister_device(vd);
-	virtio_camera_clean(vcd);
+	video_unregister_device(&vcd->video_dev);
 
-	return 0;
+	virtio_camera_vb2_queue_deinit(vcd);
+
+	while (stream->nformats--)
+		kfree(stream->formats[stream->nformats].frames);
+	kfree(stream->formats);
+
+	list_for_each_entry_safe(v4l2_ctrl, next_v4l2_ctrl,
+				 &vcd->ctrls.hdl.ctrls, node) {
+		kfree(v4l2_ctrl->priv);
+	}
+	v4l2_ctrl_handler_free(&vcd->ctrls.hdl);
 }

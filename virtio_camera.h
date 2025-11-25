@@ -63,9 +63,22 @@ struct virtio_camera_event_queue {
 	struct work_struct reclaim_work;
 };
 
+struct virtio_camera_stream {
+	uint32_t stream_id;
+
+	uint32_t fmt_info_len;
+
+	struct video_device *video_dev;
+
+	struct v4l2_pix_format_mplane pix_format;
+
+	struct virtio_camera_format_info *formats;
+	unsigned int nformats;
+};
+
 struct virtio_camera_sensor {
 	uint32_t min_buf_needed;
-	struct list_head streams_list;
+	struct virtio_camera_stream stream;
 };
 
 struct camera_format_frame {
@@ -86,20 +99,6 @@ enum virtio_camera_stream_state {
 struct virtio_camera_fh {
 	struct v4l2_fh fh;
 	struct virtio_camera_stream *stream;
-};
-
-struct virtio_camera_stream {
-	uint32_t stream_id;
-
-	uint32_t fmt_info_len;
-
-	struct video_device *video_dev;
-
-	struct v4l2_pix_format_mplane pix_format;
-
-	struct virtio_camera_format_info *formats;
-	unsigned int nformats;
-	struct list_head list;
 };
 
 struct virtio_camera_buffer {
@@ -150,7 +149,7 @@ struct virtio_camera_device {
 /* virtio_camera_device.c */
 
 int virtio_camera_device_init(struct virtio_camera_device *vcd);
-int virtio_camera_device_deinit(struct virtio_camera_device *vcd);
+void virtio_camera_device_deinit(struct virtio_camera_device *vcd);
 
 /* virtio_camera_vq.c */
 

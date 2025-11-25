@@ -12,9 +12,11 @@
 	(sizeof(struct virtio_camera_vbuffer) + MAX_INLINE_CMD_SIZE + \
 	 MAX_INLINE_RESP_SIZE)
 
-static void fmt_virtio_to_v4l2(struct virtio_camera_device *vcd,
-			       struct v4l2_pix_format_mplane *pix_fmt,
-			       const struct virtio_camera_stream_format *fmt);
+static_assert(VIRTIO_CAMERA_MAX_PLANES <= VIDEO_MAX_PLANES);
+
+static int fmt_virtio_to_v4l2(struct virtio_camera_device *vcd,
+			      struct v4l2_pix_format_mplane *pix_fmt,
+			      const struct virtio_camera_stream_format *fmt);
 
 static bool virtio_camera_vbuf_is_pending(struct virtio_camera_device *vcd,
 					  struct virtio_camera_vbuffer *vbuf)
@@ -127,10 +129,8 @@ virtio_camera_alloc_req_resp(struct virtio_camera_device *vcd,
 	struct virtio_camera_vbuffer *vbuf;
 
 	vbuf = virtio_camera_get_vbuf(vcd, req_size, resp_buf, resp_size, cb);
-	if (IS_ERR(vbuf)) {
-		*vbuffer_p = NULL;
+	if (IS_ERR(vbuf))
 		return ERR_CAST(vbuf);
-	}
 
 	*vbuffer_p = vbuf;
 	return vbuf->buf;
@@ -308,34 +308,12 @@ void virtio_camera_event_cb(struct virtqueue *vq)
 	schedule_work(&vcd->event_vq.reclaim_work);
 }
 
-/* VIRTIO_CAMERA_CMD_GET_CAMERA_INFO */
-static void virtio_camera_get_camera_info_cb(
-	struct virtio_camera_device *vcd,
-	struct virtio_camera_get_camera_info_resp *resp)
-{
-	struct virtio_camera_stream *stream;
-	int i;
-
-	for (i = 0; i < le32_to_cpu(resp->stream_cnt); ++i) {
-		stream = kzalloc(sizeof(*stream), GFP_KERNEL);
-		stream->stream_id = i;
-		stream->video_dev = &vcd->video_dev;
-		list_add_tail(&stream->list, &vcd->camera_sensor.streams_list);
-	}
-
-	vcd->ctrl_info_len = resp->ctrl_info_len;
-
-	vcd->camera_sensor.min_buf_needed = le32_to_cpu(resp->min_buf_needed);
-}
-
 static int virtio_camera_set_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct virtio_camera_device *vcd = container_of(
 		ctrl->handler, struct virtio_camera_device, ctrls.hdl);
-	//TODO: implement multistream support
-	struct virtio_camera_stream *stream =
-		list_first_entry_or_null(&vcd->camera_sensor.streams_list,
-					 struct virtio_camera_stream, list);
+
+	struct virtio_camera_stream *stream = &vcd->camera_sensor.stream;
 	int ret = 0;
 	switch (ctrl->id) {
 	case V4L2_CID_EXPOSURE_AUTO:
@@ -492,22 +470,22 @@ int virtio_camera_cmd_get_camera_info(struct virtio_camera_device *vcd)
 		goto error_buffer_sync;
 	}
 
-	virtio_camera_get_camera_info_cb(vcd, resp);
+	if (resp->stream_cnt != 1) {
+		v4l2_err(&vcd->v4l2_dev, "support 1 stream, backend wants %u\n",
+			 le32_to_cpu(resp->stream_cnt));
+		goto error_buffer_sync;
+	}
+
+	vcd->camera_sensor.stream.stream_id = 0;
+	vcd->camera_sensor.stream.video_dev = &vcd->video_dev;
+	vcd->ctrl_info_len = resp->ctrl_info_len;
+	vcd->camera_sensor.min_buf_needed = le32_to_cpu(resp->min_buf_needed);
 
 error_buffer_sync:
 	virtio_camera_free_vbuf(vcd, vbuf);
 error:
 	kfree(resp);
 	return ret;
-}
-
-static void virtio_camera_free_fmt(struct virtio_camera_stream *stream)
-{
-	unsigned int i;
-	for (i = 0; i < stream->nformats; i++) {
-		kfree(stream->formats[i].frames);
-	}
-	kfree(stream->formats);
 }
 
 static void
@@ -615,7 +593,9 @@ static int virtio_camera_cmd_get_stream_formats_done(
 		offset += fmt_size;
 	}
 
-	fmt_virtio_to_v4l2(vcd, &stream->pix_format, &resp->stream_fmt);
+	ret = fmt_virtio_to_v4l2(vcd, &stream->pix_format, &resp->stream_fmt);
+	if (ret)
+		goto parse_fmt_err;
 
 	/* TODO: Implement colorspace adjustment according to backend.
 	 * For now, we set it to a default one to keep v4l2-compliance happy.
@@ -628,7 +608,9 @@ static int virtio_camera_cmd_get_stream_formats_done(
 	return 0;
 
 parse_fmt_err:
-	virtio_camera_free_fmt(stream);
+	while (stream->nformats--)
+		kfree(stream->formats[stream->nformats].frames);
+	kfree(stream->formats);
 	return ret;
 }
 
@@ -703,11 +685,7 @@ int virtio_camera_cmd_get_stream_formats(struct virtio_camera_device *vcd,
 		v4l2_err(&vcd->v4l2_dev,
 			 "timed out waiting for get stream formats");
 		goto error_buffer_sync;
-	} else if (le32_to_cpu(resp->result) != VIRTIO_CAMERA_RESULT_OK ||
-		   le32_to_cpu(resp->num_entries) <= 0 ||
-		   le32_to_cpu(resp->stream_fmt.num_planes) <= 0 ||
-		   le32_to_cpu(resp->stream_fmt.num_planes) >
-			   VIRTIO_CAMERA_MAX_PLANES) {
+	} else if (le32_to_cpu(resp->result) != VIRTIO_CAMERA_RESULT_OK) {
 		ret = -EINVAL;
 		goto error_buffer_sync;
 	}
@@ -864,22 +842,24 @@ int virtio_camera_cmd_set_control(struct virtio_camera_device *vcd,
 	return ret;
 }
 
-static void fmt_virtio_to_v4l2(struct virtio_camera_device *vcd,
-			       struct v4l2_pix_format_mplane *pix_fmt,
-			       const struct virtio_camera_stream_format *fmt)
+static int fmt_virtio_to_v4l2(struct virtio_camera_device *vcd,
+			      struct v4l2_pix_format_mplane *pix_fmt,
+			      const struct virtio_camera_stream_format *fmt)
 {
 	uint8_t i;
+	uint8_t num_planes;
+
+	num_planes = le32_to_cpu(fmt->num_planes);
+	if (!num_planes || num_planes > VIRTIO_CAMERA_MAX_PLANES) {
+		v4l2_err(&vcd->v4l2_dev, "Wrong plane cnt=%u\n", num_planes);
+		return -EINVAL;
+	}
 
 	pix_fmt->pixelformat = le32_to_cpu(fmt->format);
 	pix_fmt->width = le32_to_cpu(fmt->width);
 	pix_fmt->height = le32_to_cpu(fmt->height);
 	pix_fmt->field = V4L2_FIELD_NONE;
-	pix_fmt->num_planes = le32_to_cpu(fmt->num_planes);
-	if (pix_fmt->num_planes > VIDEO_MAX_PLANES) {
-		v4l2_warn(&vcd->v4l2_dev, "plane cnt too big, cap to %d\n",
-			  VIDEO_MAX_PLANES);
-		pix_fmt->num_planes = VIDEO_MAX_PLANES;
-	}
+	pix_fmt->num_planes = num_planes;
 
 	memset(pix_fmt->reserved, 0, sizeof(pix_fmt->reserved));
 
@@ -891,6 +871,8 @@ static void fmt_virtio_to_v4l2(struct virtio_camera_device *vcd,
 		memset(pix_fmt->plane_fmt[i].reserved, 0,
 		       sizeof(pix_fmt->plane_fmt[i].reserved));
 	}
+
+	return 0;
 }
 
 /* VIRTIO_CAMERA_CMD_GET_FORMAT */
@@ -919,7 +901,7 @@ int virtio_camera_cmd_get_format(struct virtio_camera_device *vcd,
 		v4l2_err(&vcd->v4l2_dev, "failed to get format");
 		ret = -EINVAL;
 	} else {
-		fmt_virtio_to_v4l2(vcd, &stream->pix_format, &resp->fmt);
+		ret = fmt_virtio_to_v4l2(vcd, &stream->pix_format, &resp->fmt);
 	}
 
 	virtio_camera_free_vbuf(vcd, vbuf);
@@ -954,7 +936,7 @@ int virtio_camera_cmd_set_format(struct virtio_camera_device *vcd,
 		v4l2_err(&vcd->v4l2_dev, "failed to set format");
 		ret = -EINVAL;
 	} else {
-		fmt_virtio_to_v4l2(vcd, &stream->pix_format, &resp->fmt);
+		ret = fmt_virtio_to_v4l2(vcd, &stream->pix_format, &resp->fmt);
 	}
 
 	virtio_camera_free_vbuf(vcd, vbuf);
