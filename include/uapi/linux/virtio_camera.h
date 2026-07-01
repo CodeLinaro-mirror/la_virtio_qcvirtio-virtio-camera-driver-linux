@@ -26,6 +26,7 @@ enum virtio_camera_cmd_type {
 	VIRTIO_CAMERA_CMD_RESOURCE_CREATE,
 	VIRTIO_CAMERA_CMD_RESOURCE_QUEUE,
 	VIRTIO_CAMERA_CMD_RESOURCE_DESTROY,
+	VIRTIO_CAMERA_CMD_RESOURCE_FLUSH,
 	VIRTIO_CAMERA_CMD_GET_CONTROL,
 	VIRTIO_CAMERA_CMD_SET_CONTROL,
 	VIRTIO_CAMERA_CMD_GET_FORMAT,
@@ -44,6 +45,16 @@ enum virtio_camera_result {
 
 struct virtio_camera_config {
 	char name[32];
+};
+
+struct virtio_camera_cmd_hdr {
+	__le32 cmd_type; /* VIRTIO_CAMERA_CMD_* */
+	__u8 padding[4];
+};
+
+struct virtio_camera_cmd_resp_hdr {
+	__le32 result; /* VIRTIO_CAMERA_RESULT_* */
+	__u8 padding[4];
 };
 
 /* VIRTIO_CAMERA_CMD_GET_CAMERA_INFO */
@@ -114,7 +125,7 @@ struct virtio_camera_stream_format_frame {
 	struct virtio_camera_format_range height;
 };
 
-#define VIRTIO_CAMERA_MAX_PLANES 2
+#define VIRTIO_CAMERA_MAX_PLANES 8
 
 struct virtio_camera_stream_format {
 	__le32 format;
@@ -191,6 +202,17 @@ struct virtio_camera_resource_destroy {
 };
 
 struct virtio_camera_resource_destroy_resp {
+	__le32 result; /* VIRTIO_CAMERA_RESULT_* */
+	__u8 padding[4];
+};
+
+/* VIRTIO_CAMERA_CMD_RESOURCE_FLUSH */
+struct virtio_camera_resource_flush {
+	__le32 cmd_type; /* VIRTIO_CAMERA_CMD_* */
+	__le32 stream_id;
+};
+
+struct virtio_camera_resource_flush_resp {
 	__le32 result; /* VIRTIO_CAMERA_RESULT_* */
 	__u8 padding[4];
 };

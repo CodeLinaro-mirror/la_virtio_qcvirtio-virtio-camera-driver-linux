@@ -8,7 +8,6 @@ ccflags-y += -Werror
 
 virtio_camera-y := \
 	virtio_camera_driver.o \
-	virtio_camera_device.o \
 	virtio_camera_vq.o \
 	virtio_camera_v4l2.o \
 

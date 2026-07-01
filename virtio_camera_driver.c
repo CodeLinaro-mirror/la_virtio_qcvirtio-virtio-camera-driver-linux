@@ -5,48 +5,152 @@
 /* Driver for virtio camera device. */
 
 #include <linux/module.h>
+#include <linux/virtio.h>
 #include <linux/virtio_config.h>
-#include <linux/wait.h>
 #include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
 #include <linux/dma-map-ops.h>
 #endif
 
 #include "virtio_camera.h"
 
-static bool mplane_api = false;
+static bool mplane_api;
 module_param(mplane_api, bool, 0644);
 MODULE_PARM_DESC(mplane_api,
 		 "0 (default) - single planar API, 1 - multiplanar API");
 
-static int virtio_camera_probe(struct virtio_device *vdev)
+/*
+ * Perform virtio camera protocol specific initialization and
+ * register video device.
+ */
+static int viocam_device_init(struct viocam_device *vcd)
 {
 	int ret;
-	struct virtio_camera_device *vcd;
+	struct viocam_stream *stream = &vcd->stream;
+	struct video_device *vd = &stream->video_dev;
+	uint32_t ctrl_info_len, fmt_info_len, min_bufs_needed;
+
+	static_assert(sizeof(vd->name) >= sizeof(vcd->name));
+
+	ida_init(&vcd->resource_ida);
+
+	ret = virtio_camera_cmd_get_camera_info(vcd, &ctrl_info_len,
+						&min_bufs_needed);
+	if (ret < 0)
+		return ret;
+
+	ret = virtio_camera_cmd_enum_camera_ctrls(vcd, ctrl_info_len);
+	if (ret < 0)
+		return ret;
+
+	/* Create a stream. The function/command only purpose is to get stream's
+	 * format info size for virtio_camera_cmd_get_stream_formats(). It may
+	 * do more in future. Or not.
+	 *
+	 * STREAM_DESTROY counterpart is left undone since it doesn't
+	 * have much of use without multistreaming support feature
+	 * clearly defined and implemented.
+	 */
+	ret = virtio_camera_cmd_stream_create(vcd, &fmt_info_len);
+	if (ret < 0)
+		goto err_stream_create;
+
+	ret = virtio_camera_cmd_get_stream_formats(vcd, fmt_info_len,
+						   &stream->curr_fmt,
+						   &stream->formats,
+						   &stream->nformats);
+	if (ret < 0)
+		goto err_stream_create;
+
+	ret = viocam_vb2_queue_init(vcd, stream, min_bufs_needed);
+	if (ret < 0) {
+		v4l2_err(&vcd->v4l2_dev, "failed to init vb2 queue: %d", ret);
+		goto err_stream_create;
+	}
+	vd->queue = &stream->vb_q;
+
+	mutex_init(&stream->video_dev_mutex);
+	vd->lock = &stream->video_dev_mutex;
+	vd->v4l2_dev = &vcd->v4l2_dev;
+	vd->vfl_dir = VFL_DIR_RX;
+	vd->ioctl_ops = &viocam_ioctl_ops;
+	vd->fops = &viocam_fops;
+
+	vd->device_caps = V4L2_CAP_STREAMING;
+	if (vcd->mplane_api)
+		vd->device_caps |= V4L2_CAP_VIDEO_CAPTURE_MPLANE;
+	else
+		vd->device_caps |= V4L2_CAP_VIDEO_CAPTURE;
+
+	vd->release = video_device_release_empty;
+
+	video_set_drvdata(vd, vcd);
+
+	strscpy(vd->name, vcd->name, sizeof(vd->name));
+
+#if KERNEL_VERSION(5, 7, 0) <= LINUX_VERSION_CODE
+	ret = video_register_device(&stream->video_dev, VFL_TYPE_VIDEO, -1);
+#else
+	ret = video_register_device(&stream->video_dev, VFL_TYPE_GRABBER, -1);
+#endif
+	if (ret) {
+		v4l2_err(&vcd->v4l2_dev, "Failed to register video device: %d",
+			 ret);
+		goto err_register;
+	}
+
+	return 0;
+
+err_register:
+	vb2_queue_release(&stream->vb_q);
+err_stream_create:
+	v4l2_ctrl_handler_free(&vcd->ctrls.hdl);
+	return ret;
+}
+
+static void viocam_device_deinit(struct viocam_device *vcd)
+{
+	/* FIXME: replace the sequence below with vb2_video_unregister_device()
+	 * once the call is allowed by Android GKI.
+	 */
+	get_device(&vcd->stream.video_dev.dev);
+
+	video_unregister_device(&vcd->stream.video_dev);
+	mutex_lock(vcd->stream.video_dev.queue->lock);
+	vb2_queue_release(vcd->stream.video_dev.queue);
+	vcd->stream.video_dev.queue->owner = NULL;
+	mutex_unlock(vcd->stream.video_dev.queue->lock);
+
+	put_device(&vcd->stream.video_dev.dev);
+
+	v4l2_ctrl_handler_free(&vcd->ctrls.hdl);
+}
+
+static int viocam_probe(struct virtio_device *vdev)
+{
+	int ret;
+	struct viocam_device *vcd;
 	struct device *dev = &vdev->dev;
 	struct device *pdev = dev->parent;
 
 	struct virtqueue *vqs[2];
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+#if KERNEL_VERSION(6, 11, 0) <= LINUX_VERSION_CODE
 	struct virtqueue_info vqs_info[] = {
-		{ "cmd_vq", virtio_camera_cmd_cb },
-		{ "event_vq", virtio_camera_event_cb },
+		{ "cmd_vq", viocam_cmd_cb },
+		{ "event_vq", viocam_event_cb },
 	};
 #else
 	static const char *const names[] = { "cmd_vq", "event_vq" };
-	static vq_callback_t *callbacks[] = { virtio_camera_cmd_cb,
-					      virtio_camera_event_cb };
+	static vq_callback_t *callbacks[] = { viocam_cmd_cb, viocam_event_cb };
 #endif
-	dev_dbg(dev, "%s()\n", __func__);
 
 	vcd = devm_kzalloc(dev, sizeof(*vcd), GFP_KERNEL);
 	if (!vcd)
 		return -ENOMEM;
 
-	vcd->vdev = vdev;
 	vdev->priv = vcd;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+#if KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE
 	vcd->has_iommu = !virtio_has_dma_quirk(vdev);
 #else
 	vcd->has_iommu = !virtio_has_iommu_quirk(vdev);
@@ -80,72 +184,60 @@ static int virtio_camera_probe(struct virtio_device *vdev)
 
 	ret = v4l2_device_register(dev, &vcd->v4l2_dev);
 	if (ret)
-		goto error;
+		return ret;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+#if KERNEL_VERSION(6, 11, 0) <= LINUX_VERSION_CODE
 	ret = virtio_find_vqs(vdev, 2, vqs, vqs_info, NULL);
 #else
 	ret = virtio_find_vqs(vdev, 2, vqs, callbacks, names, NULL);
 #endif
 	if (ret) {
 		v4l2_err(&vcd->v4l2_dev, "failed to find virt queues\n");
-		goto error;
+		goto err_find_vq;
 	}
 
 	spin_lock_init(&vcd->cmd_vq.qlock);
-	spin_lock_init(&vcd->event_vq.qlock);
-	init_waitqueue_head(&vcd->cmd_vq.reclaim_queue);
-	INIT_WORK(&vcd->event_vq.reclaim_work, virtio_camera_process_events);
 
 	vcd->cmd_vq.vq = vqs[0];
 	vcd->event_vq.vq = vqs[1];
 
-	INIT_LIST_HEAD(&vcd->pending_vbuf_list);
-
-	ret = virtio_camera_alloc_vbufs(vcd);
-	if (ret) {
-		v4l2_err(&vcd->v4l2_dev, "failed to alloc vbufs\n");
-		goto failed_alloc_vbufs;
-	}
-
-	ret = virtio_camera_alloc_events(vcd);
-	if (ret) {
-		v4l2_err(&vcd->v4l2_dev, "failed to alloc events");
-		goto failed_alloc_events;
-	}
-
 	virtio_device_ready(vdev);
 
-	ret = virtio_camera_device_init(vcd);
+	ret = viocam_device_init(vcd);
 	if (ret)
-		goto failed_init_camera;
+		goto err_init_camera;
+
+	dev_info(&vdev->dev, "Register '%s' as /dev/video%d",
+		 vcd->stream.video_dev.name, vcd->stream.video_dev.num);
 
 	return 0;
 
-failed_init_camera:
-	virtio_camera_free_events(vcd);
-failed_alloc_events:
-	virtio_camera_free_vbufs(vcd);
-failed_alloc_vbufs:
+err_init_camera:
+#if KERNEL_VERSION(5, 17, 0) <= LINUX_VERSION_CODE
+	virtio_reset_device(vdev);
+#else
+	vdev->config->reset(vdev);
+#endif
 	vdev->config->del_vqs(vdev);
-error:
-	devm_kfree(&vdev->dev, vcd);
+err_find_vq:
+	v4l2_device_unregister(&vcd->v4l2_dev);
 	return ret;
 }
 
-static void virtio_camera_remove(struct virtio_device *vdev)
+static void viocam_remove(struct virtio_device *vdev)
 {
-	struct virtio_camera_device *vcd = vdev->priv;
+	struct viocam_device *vcd = vdev->priv;
 
-	virtio_camera_free_vbufs(vcd);
-	virtio_camera_free_events(vcd);
+	viocam_device_deinit(vcd);
+
+#if KERNEL_VERSION(5, 17, 0) <= LINUX_VERSION_CODE
+	virtio_reset_device(vdev);
+#else
 	vdev->config->reset(vdev);
+#endif
 	vdev->config->del_vqs(vdev);
 
 	v4l2_device_unregister(&vcd->v4l2_dev);
-	virtio_camera_device_deinit(vcd);
-
-	devm_kfree(&vdev->dev, vcd);
 }
 
 static struct virtio_device_id id_table[] = {
@@ -157,17 +249,17 @@ static unsigned int features[] = {
 
 };
 
-static struct virtio_driver virtio_camera_driver = {
+static struct virtio_driver viocam_driver = {
 	.feature_table = features,
 	.feature_table_size = ARRAY_SIZE(features),
 	.driver.name = KBUILD_MODNAME,
 	.driver.owner = THIS_MODULE,
 	.id_table = id_table,
-	.probe = virtio_camera_probe,
-	.remove = virtio_camera_remove,
+	.probe = viocam_probe,
+	.remove = viocam_remove,
 };
 
-module_virtio_driver(virtio_camera_driver);
+module_virtio_driver(viocam_driver);
 
 MODULE_DEVICE_TABLE(virtio, id_table);
 MODULE_DESCRIPTION("virtio camera driver");
