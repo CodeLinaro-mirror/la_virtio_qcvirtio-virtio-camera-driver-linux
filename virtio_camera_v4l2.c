@@ -20,96 +20,45 @@ typedef int (*fmtfunc)(struct file *file, void *priv, struct v4l2_format *f);
  * Helper functions
  */
 
-static struct virtio_camera_format_info *
-find_stream_fmt(struct virtio_camera_stream *stream, uint32_t format)
+static struct viocam_v4l2_format *find_stream_fmt(struct viocam_stream *stream,
+						  uint32_t format)
 {
 	unsigned int i;
+
 	for (i = 0; i < stream->nformats; i++) {
-		if (stream->formats[i].desc.format == format) {
+		if (stream->formats[i].pixelformat == format)
 			return &stream->formats[i];
-		}
 	}
 
 	return NULL;
-}
-
-static void virtio_camera_resource_id_get(struct virtio_camera_device *vcd,
-					  uint32_t *id)
-{
-	int handle;
-
-	idr_preload(GFP_KERNEL);
-	spin_lock(&vcd->resource_idr_lock);
-	handle = idr_alloc(&vcd->resource_idr, NULL, 1, 0, GFP_NOWAIT);
-	spin_unlock(&vcd->resource_idr_lock);
-	idr_preload_end();
-	*id = handle;
-}
-
-static void virtio_camera_resource_id_put(struct virtio_camera_device *vcd,
-					  uint32_t id)
-{
-	spin_lock(&vcd->resource_idr_lock);
-	idr_remove(&vcd->resource_idr, id);
-	spin_unlock(&vcd->resource_idr_lock);
-}
-
-static void
-virtio_camera_vb2_queue_active_push(struct virtio_camera_device *vcd,
-				    struct virtio_camera_buffer *buf)
-{
-	unsigned long flags;
-	spin_lock_irqsave(&vcd->vbq_lock, flags);
-	list_add_tail(&buf->list, &vcd->vbq_active);
-	spin_unlock_irqrestore(&vcd->vbq_lock, flags);
-}
-
-static void virtio_camera_vb2_cancel_bufs(struct virtio_camera_device *vcd)
-{
-	unsigned long flags;
-	struct virtio_camera_buffer *buf;
-
-	spin_lock_irqsave(&vcd->vbq_lock, flags);
-	while (!list_empty(&vcd->vbq_active)) {
-		buf = list_first_entry(&vcd->vbq_active,
-				       struct virtio_camera_buffer, list);
-		list_del(&buf->list);
-		vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-	}
-	spin_unlock_irqrestore(&vcd->vbq_lock, flags);
 }
 
 /*
  * V4L2 ioctl ops
  */
 
-static int virtio_camera_querycap(struct file *file, void *fh,
-				  struct v4l2_capability *cap)
+static int viocam_querycap(struct file *file, void *fh,
+			   struct v4l2_capability *cap)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
 	struct video_device *video_dev = video_devdata(file);
 
-	if (strscpy(cap->driver, DRIVER_NAME, sizeof(cap->driver)) < 0)
-		v4l2_warn(&vcd->v4l2_dev, "failed to copy driver name");
-
-	if (strscpy(cap->card, video_dev->name, sizeof(cap->card)) < 0)
-		v4l2_warn(&vcd->v4l2_dev, "failed to copy card name");
+	strscpy(cap->driver, DRIVER_NAME, sizeof(cap->driver));
+	strscpy(cap->card, video_dev->name, sizeof(cap->card));
 
 	/*
 	 * TODO: replace platform with virtio once v4l2-compliance and v4l2
 	 * kernel docs are updated.
 	 */
-	if (snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:%s",
-		     video_dev->name) < 0)
-		v4l2_warn(&vcd->v4l2_dev, "failed to copy bus_info");
+	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:%s",
+		 video_dev->name);
 	cap->device_caps = video_dev->device_caps;
 	return 0;
 }
 
-static int virtio_camera_enum_fmt_vid_cap(struct file *file, void *fh,
-					  struct v4l2_fmtdesc *f)
+static int vidioc_enum_fmt_vid_cap(struct file *file, void *fh,
+				   struct v4l2_fmtdesc *f)
 {
-	struct virtio_camera_stream *stream = file2stream(file);
+	struct viocam_stream *stream = file2stream(file);
 
 	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
 	    f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
@@ -118,7 +67,7 @@ static int virtio_camera_enum_fmt_vid_cap(struct file *file, void *fh,
 	if (f->index >= stream->nformats)
 		return -EINVAL;
 
-	f->pixelformat = stream->formats[f->index].desc.format;
+	f->pixelformat = stream->formats[f->index].pixelformat;
 
 	return 0;
 }
@@ -187,16 +136,16 @@ static int fmt_sp2mp_func(struct file *file, void *priv, struct v4l2_format *f,
 	return ret;
 }
 
-static int virtio_camera_g_fmt_vid_cap(struct file *file, void *fh,
-				       struct v4l2_format *f)
+static int viocam_g_fmt_vid_cap(struct file *file, void *fh,
+				struct v4l2_format *f)
 {
-	struct virtio_camera_stream *stream = file2stream(file);
+	struct viocam_stream *stream = file2stream(file);
 
 	if (f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
 	    f->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
 
-	memcpy(&f->fmt.pix_mp, &stream->pix_format, sizeof(f->fmt.pix_mp));
+	memcpy(&f->fmt.pix_mp, &stream->curr_fmt, sizeof(f->fmt.pix_mp));
 
 	return 0;
 }
@@ -206,12 +155,12 @@ static inline bool within_range(uint32_t min, uint32_t val, uint32_t max)
 	return ((min <= val) && (val <= max));
 }
 
-static int virtio_camera_try_fmt_vid_cap(struct file *file, void *fh,
-					 struct v4l2_format *f)
+static int viocam_try_fmt_vid_cap(struct file *file, void *fh,
+				  struct v4l2_format *f)
 {
-	struct virtio_camera_stream *stream = file2stream(file);
-	struct virtio_camera_format_info *fmt;
-	struct virtio_camera_stream_format_frame *frame;
+	struct viocam_stream *stream = file2stream(file);
+	struct viocam_v4l2_format *fmt;
+	struct v4l2_frmsize_stepwise *frame;
 	struct v4l2_pix_format_mplane *mp = &f->fmt.pix_mp;
 	int i;
 
@@ -224,15 +173,14 @@ static int virtio_camera_try_fmt_vid_cap(struct file *file, void *fh,
 		/* Requested pixelformat is not supported. Pick up the first
 		 * supported one and hope it will be enough.
 		 */
-		if (stream->nformats) {
+		if (stream->nformats)
 			fmt = &stream->formats[0];
-		}
 	}
 
-	if (!fmt || !fmt->desc.num_frames)
+	if (!fmt || !fmt->num_frames)
 		return -EIO;
 
-	mp->pixelformat = fmt->desc.format;
+	mp->pixelformat = fmt->pixelformat;
 
 	/*
 	 * TODO: Maybe retrieve the value from backend format info?
@@ -242,22 +190,22 @@ static int virtio_camera_try_fmt_vid_cap(struct file *file, void *fh,
 	/* Try to find a suitable frame size. If there is no match, then
 	 * just use the last (usually biggest) frame.
 	 */
-	frame = &fmt->frames[0].frame;
-	for (i = 0; i < fmt->desc.num_frames; i++) {
-		frame = &fmt->frames[i].frame;
-		if (within_range(frame->width.min, mp->width,
-				 frame->width.max) &&
-		    within_range(frame->height.min, mp->height,
-				 frame->height.max))
+	frame = &fmt->frames[0];
+	for (i = 0; i < fmt->num_frames; i++) {
+		frame = &fmt->frames[i];
+		if (within_range(frame->min_width, mp->width,
+				 frame->max_width) &&
+		    within_range(frame->min_height, mp->height,
+				 frame->max_height))
 			break;
 	}
 
-	if (frame->width.step)
-		mp->width = ALIGN(mp->width, frame->width.step);
-	if (frame->height.step)
-		mp->height = ALIGN(mp->height, frame->height.step);
-	mp->width = clamp(mp->width, frame->width.min, frame->width.max);
-	mp->height = clamp(mp->height, frame->height.min, frame->height.max);
+	if (frame->step_width)
+		mp->width = ALIGN(mp->width, frame->step_width);
+	if (frame->step_height)
+		mp->height = ALIGN(mp->height, frame->step_height);
+	mp->width = clamp(mp->width, frame->min_width, frame->max_width);
+	mp->height = clamp(mp->height, frame->min_height, frame->max_height);
 
 	/* TODO: Implement colorspace adjustment according to backend.
 	 * For now, we clamp it to a default one to keep v4l2-compliance happy.
@@ -279,30 +227,25 @@ static int virtio_camera_try_fmt_vid_cap(struct file *file, void *fh,
 	return 0;
 }
 
-static int virtio_camera_s_fmt_vid_cap(struct file *file, void *fh,
-				       struct v4l2_format *f)
+static int viocam_s_fmt_vid_cap(struct file *file, void *fh,
+				struct v4l2_format *f)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
-	struct virtio_camera_stream *stream = file2stream(file);
+	struct viocam_device *vcd = video_drvdata(file);
+	struct viocam_stream *stream = file2stream(file);
 	int ret;
 
-	if (vb2_is_busy(&vcd->vb_q)) {
+	if (vb2_is_busy(&stream->vb_q))
 		return -EBUSY;
-	}
 
-	ret = virtio_camera_try_fmt_vid_cap(file, fh, f);
+	ret = viocam_try_fmt_vid_cap(file, fh, f);
 	if (ret < 0)
 		return ret;
 
-	memcpy(&stream->pix_format, &f->fmt.pix_mp, sizeof(f->fmt.pix_mp));
+	ret = virtio_camera_cmd_set_format(vcd, &f->fmt.pix_mp);
+	if (ret < 0)
+		return ret;
 
-	ret = virtio_camera_cmd_set_format(vcd, stream);
-	if (ret < 0) {
-		v4l2_err(&vcd->v4l2_dev, "failed to set a new format");
-		return -EINVAL;
-	}
-
-	memcpy(&f->fmt.pix_mp, &stream->pix_format, sizeof(f->fmt.pix_mp));
+	memcpy(&stream->curr_fmt, &f->fmt.pix_mp, sizeof(f->fmt.pix_mp));
 
 	return 0;
 }
@@ -310,61 +253,67 @@ static int virtio_camera_s_fmt_vid_cap(struct file *file, void *fh,
 static int vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
 					 struct v4l2_format *f)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
+	struct viocam_device *vcd = video_drvdata(file);
+
 	if (!vcd->mplane_api)
 		return -ENOTTY;
-	return virtio_camera_try_fmt_vid_cap(file, priv, f);
+	return viocam_try_fmt_vid_cap(file, priv, f);
 }
 
 static int vidioc_try_fmt_vid_cap(struct file *file, void *priv,
 				  struct v4l2_format *f)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
+	struct viocam_device *vcd = video_drvdata(file);
+
 	if (vcd->mplane_api)
 		return -ENOTTY;
-	return fmt_sp2mp_func(file, priv, f, virtio_camera_try_fmt_vid_cap);
+	return fmt_sp2mp_func(file, priv, f, viocam_try_fmt_vid_cap);
 }
 
 static int vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
 				       struct v4l2_format *f)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
+	struct viocam_device *vcd = video_drvdata(file);
+
 	if (!vcd->mplane_api)
 		return -ENOTTY;
-	return virtio_camera_g_fmt_vid_cap(file, priv, f);
+	return viocam_g_fmt_vid_cap(file, priv, f);
 }
 
 static int vidioc_g_fmt_vid_cap(struct file *file, void *priv,
 				struct v4l2_format *f)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
+	struct viocam_device *vcd = video_drvdata(file);
+
 	if (vcd->mplane_api)
 		return -ENOTTY;
-	return fmt_sp2mp_func(file, priv, f, virtio_camera_g_fmt_vid_cap);
+	return fmt_sp2mp_func(file, priv, f, viocam_g_fmt_vid_cap);
 }
 
 static int vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
 				       struct v4l2_format *f)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
+	struct viocam_device *vcd = video_drvdata(file);
+
 	if (!vcd->mplane_api)
 		return -ENOTTY;
-	return virtio_camera_s_fmt_vid_cap(file, priv, f);
+	return viocam_s_fmt_vid_cap(file, priv, f);
 }
 
 static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
 				struct v4l2_format *f)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
+	struct viocam_device *vcd = video_drvdata(file);
+
 	if (vcd->mplane_api)
 		return -ENOTTY;
-	return fmt_sp2mp_func(file, priv, f, virtio_camera_s_fmt_vid_cap);
+	return fmt_sp2mp_func(file, priv, f, viocam_s_fmt_vid_cap);
 }
 
 static int vidioc_enum_input(struct file *file, void *fh,
 			     struct v4l2_input *inp)
 {
-	struct virtio_camera_device *vcd = video_drvdata(file);
+	struct viocam_device *vcd = video_drvdata(file);
 
 	if (inp->index != 0)
 		return -EINVAL;
@@ -385,37 +334,31 @@ static int vidioc_g_input(struct file *file, void *priv, unsigned int *i)
 
 static int vidioc_s_input(struct file *file, void *fh, unsigned int i)
 {
-	if (i != 0)
-		return -EINVAL;
-
-	return 0;
+	return i == 0 ? 0 : -EINVAL;
 }
 
-static int virtio_camera_enum_framesizes(struct file *file, void *fh,
-					 struct v4l2_frmsizeenum *f)
+static int viocam_enum_framesizes(struct file *file, void *fh,
+				  struct v4l2_frmsizeenum *f)
 {
-	struct virtio_camera_stream *stream = file2stream(file);
-	struct virtio_camera_format_info *fmt;
-	struct camera_format_frame *frm;
-	struct virtio_camera_stream_format_frame *frame;
+	struct viocam_stream *stream = file2stream(file);
+	struct viocam_v4l2_format *fmt;
+	struct v4l2_frmsize_stepwise *frame;
 	int idx = f->index;
 
 	fmt = find_stream_fmt(stream, f->pixel_format);
-	if (fmt == NULL) {
-		return -EINVAL;
-	}
-
-	if (idx >= fmt->desc.num_frames)
+	if (fmt == NULL)
 		return -EINVAL;
 
-	frm = &fmt->frames[idx];
-	frame = &frm->frame;
+	if (idx >= fmt->num_frames)
+		return -EINVAL;
 
-	if (frame->width.min == frame->width.max &&
-	    frame->height.min == frame->height.max) {
+	frame = &fmt->frames[idx];
+
+	if (frame->min_width == frame->max_width &&
+	    frame->min_height == frame->max_height) {
 		f->type = V4L2_FRMSIZE_TYPE_DISCRETE;
-		f->discrete.width = frame->width.min;
-		f->discrete.height = frame->height.min;
+		f->discrete.width = frame->min_width;
+		f->discrete.height = frame->min_height;
 		return 0;
 	}
 
@@ -423,39 +366,219 @@ static int virtio_camera_enum_framesizes(struct file *file, void *fh,
 		return -EINVAL;
 
 	f->type = V4L2_FRMSIZE_TYPE_CONTINUOUS;
-	f->stepwise.min_width = frame->width.min;
-	f->stepwise.max_width = frame->width.max;
-	f->stepwise.min_height = frame->height.min;
-	f->stepwise.max_height = frame->height.max;
-	f->stepwise.step_width = frame->width.step;
-	f->stepwise.step_height = frame->height.step;
+	f->stepwise = *frame;
 	return 0;
 }
 
-const struct v4l2_ioctl_ops virtio_camera_ioctl_ops = {
-	.vidioc_querycap = virtio_camera_querycap,
-	.vidioc_enum_fmt_vid_cap = virtio_camera_enum_fmt_vid_cap,
+/*
+ * File ops
+ */
+
+static int viocam_device_open(struct file *file)
+{
+	struct viocam_device *vcd = video_drvdata(file);
+	struct video_device *video_dev = video_devdata(file);
+	struct viocam_fh *vfh;
+
+	vfh = kzalloc(sizeof(*vfh), GFP_KERNEL);
+	if (vfh == NULL)
+		return -ENOMEM;
+
+	vfh->stream = &vcd->stream;
+
+	mutex_lock(video_dev->lock);
+	v4l2_fh_init(&vfh->fh, video_dev);
+	file->private_data = &vfh->fh;
+	v4l2_fh_add(&vfh->fh);
+	mutex_unlock(video_dev->lock);
+
+	return 0;
+}
+
+static int viocam_device_release(struct file *file)
+{
+	vb2_fop_release(file);
+	return 0;
+}
+
+/*
+ * Videobuf2 ops
+ */
+
+static int viocam_vb2_queue_setup(struct vb2_queue *vq, unsigned int *nbuffers,
+				  unsigned int *nplanes, unsigned int sizes[],
+				  struct device *alloc_devs[])
+{
+	struct viocam_stream *stream = vb2_get_drv_priv(vq);
+	unsigned int i;
+	unsigned int fmt_nplanes = stream->curr_fmt.num_planes;
+
+	if (*nplanes) {
+		if (*nplanes != fmt_nplanes)
+			return -EINVAL;
+
+		for (i = 0; i < fmt_nplanes; ++i) {
+			if (sizes[i] <
+				    stream->curr_fmt.plane_fmt[i].sizeimage ||
+			    !IS_ALIGNED(sizes[i], PAGE_SIZE))
+				return -EINVAL;
+		}
+	} else {
+		for (i = 0; i < fmt_nplanes; ++i)
+			sizes[i] = stream->curr_fmt.plane_fmt[i].sizeimage;
+	}
+
+	*nplanes = fmt_nplanes;
+
+	return 0;
+}
+
+static inline struct viocam_buffer *vb2_to_viocam_buf(struct vb2_buffer *vb)
+{
+	return container_of(to_vb2_v4l2_buffer(vb), struct viocam_buffer, vb);
+}
+
+static int viocam_vb2_buf_init(struct vb2_buffer *vb)
+{
+	struct viocam_stream *stream = vb2_get_drv_priv(vb->vb2_queue);
+	struct viocam_device *vcd = video_get_drvdata(&stream->video_dev);
+	struct viocam_buffer *buf = vb2_to_viocam_buf(vb);
+	int ret;
+	uint32_t resource_id;
+	unsigned int i;
+
+	ret = ida_alloc(&vcd->resource_ida, GFP_KERNEL);
+	if (ret < 0)
+		return ret;
+
+	resource_id = ret;
+
+	ret = virtio_camera_cmd_resource_create(vcd, buf, resource_id);
+	if (!ret) {
+		buf->resource_id = resource_id;
+		buf->vb.field = V4L2_FIELD_NONE;
+		for (i = 0; i < vb->num_planes; ++i)
+			vb2_set_plane_payload(
+				vb, i, stream->curr_fmt.plane_fmt[i].sizeimage);
+	} else {
+		ida_free(&vcd->resource_ida, resource_id);
+	}
+
+	return ret;
+}
+
+static void viocam_vb2_buf_cleanup(struct vb2_buffer *vb)
+{
+	struct viocam_stream *stream = vb2_get_drv_priv(vb->vb2_queue);
+	struct viocam_device *vcd = video_get_drvdata(&stream->video_dev);
+	struct viocam_buffer *buf = vb2_to_viocam_buf(vb);
+
+	ida_free(&vcd->resource_ida, buf->resource_id);
+
+	if (ida_is_empty(&vcd->resource_ida))
+		virtio_camera_cmd_resource_destroy(vcd);
+}
+
+static void viocam_vb2_buf_queue(struct vb2_buffer *vb)
+{
+	struct viocam_stream *stream = vb2_get_drv_priv(vb->vb2_queue);
+	struct viocam_device *vcd = video_get_drvdata(&stream->video_dev);
+	struct viocam_buffer *buf = vb2_to_viocam_buf(vb);
+	int ret;
+
+	ret = virtio_camera_cmd_resource_queue(vcd, buf);
+	if (ret < 0)
+		vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
+}
+
+static void viocam_vb2_stop_streaming(struct vb2_queue *q)
+{
+	struct viocam_stream *stream = vb2_get_drv_priv(q);
+	struct viocam_device *vcd = video_get_drvdata(&stream->video_dev);
+
+	virtio_camera_cmd_resource_flush(vcd);
+
+	/* Has to wait until all RESOURCE_QUEUE responses are collected. Not safe
+	 * to continue otherwise.
+	 */
+	vb2_wait_for_all_buffers(q);
+}
+
+static const struct vb2_ops viocam_vb2_ops = {
+	.queue_setup = viocam_vb2_queue_setup,
+	.buf_init = viocam_vb2_buf_init,
+	.buf_cleanup = viocam_vb2_buf_cleanup,
+	.buf_queue = viocam_vb2_buf_queue,
+	.stop_streaming = viocam_vb2_stop_streaming,
+	.wait_prepare = vb2_ops_wait_prepare,
+	.wait_finish = vb2_ops_wait_finish,
+};
+
+void viocam_vb2_buf_queue_done(struct viocam_buffer *buf,
+			       enum vb2_buffer_state state)
+{
+	struct vb2_buffer *vb = &buf->vb.vb2_buf;
+
+	vb->timestamp = ktime_get_ns();
+	vb2_buffer_done(vb, state);
+}
+
+int viocam_vb2_queue_init(struct viocam_device *vcd,
+			  struct viocam_stream *stream,
+			  uint32_t min_bufs_needed)
+{
+	struct vb2_queue *q = &stream->vb_q;
+
+	if (vcd->mplane_api)
+		q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	else
+		q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	q->io_modes = VB2_MMAP | VB2_DMABUF;
+	q->drv_priv = stream;
+	q->buf_struct_size = sizeof(struct viocam_buffer);
+	q->ops = &viocam_vb2_ops;
+	q->mem_ops = &vb2_dma_sg_memops;
+	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+#if KERNEL_VERSION(6, 8, 0) <= LINUX_VERSION_CODE
+	q->min_queued_buffers = min_bufs_needed;
+#else
+	q->min_buffers_needed = min_bufs_needed;
+#endif
+	q->lock = &stream->video_dev_mutex;
+	q->dev = vcd->v4l2_dev.dev;
+
+	return vb2_queue_init(q);
+}
+
+const struct v4l2_file_operations viocam_fops = {
+	.owner = THIS_MODULE,
+	.open = viocam_device_open,
+	.release = viocam_device_release,
+	.poll = vb2_fop_poll,
+	.unlocked_ioctl = video_ioctl2,
+	.mmap = vb2_fop_mmap,
+};
+
+const struct v4l2_ioctl_ops viocam_ioctl_ops = {
+	.vidioc_querycap = viocam_querycap,
+	.vidioc_enum_fmt_vid_cap = vidioc_enum_fmt_vid_cap,
 	.vidioc_g_fmt_vid_cap = vidioc_g_fmt_vid_cap,
 	.vidioc_s_fmt_vid_cap = vidioc_s_fmt_vid_cap,
 	.vidioc_try_fmt_vid_cap = vidioc_try_fmt_vid_cap,
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0))
-	.vidioc_enum_fmt_vid_cap_mplane = virtio_camera_enum_fmt_vid_cap,
+#if KERNEL_VERSION(5, 3, 0) > LINUX_VERSION_CODE
+	.vidioc_enum_fmt_vid_cap_mplane = vidioc_enum_fmt_vid_cap,
 #endif
 	.vidioc_g_fmt_vid_cap_mplane = vidioc_g_fmt_vid_cap_mplane,
 	.vidioc_s_fmt_vid_cap_mplane = vidioc_s_fmt_vid_cap_mplane,
 	.vidioc_try_fmt_vid_cap_mplane = vidioc_try_fmt_vid_cap_mplane,
-
-	.vidioc_enum_framesizes = virtio_camera_enum_framesizes,
-
+	.vidioc_enum_framesizes = viocam_enum_framesizes,
 	.vidioc_log_status = v4l2_ctrl_log_status,
 	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
-
 	.vidioc_enum_input = vidioc_enum_input,
 	.vidioc_s_input = vidioc_s_input,
 	.vidioc_g_input = vidioc_g_input,
-
-	/* videobuf */
 	.vidioc_reqbufs = vb2_ioctl_reqbufs,
 	.vidioc_querybuf = vb2_ioctl_querybuf,
 	.vidioc_qbuf = vb2_ioctl_qbuf,
@@ -466,235 +589,3 @@ const struct v4l2_ioctl_ops virtio_camera_ioctl_ops = {
 	.vidioc_streamon = vb2_ioctl_streamon,
 	.vidioc_streamoff = vb2_ioctl_streamoff,
 };
-
-/*
- * Videobuf2 ops
- */
-
-static int virtio_camera_vb2_queue_setup(struct vb2_queue *vq,
-					 unsigned *nbuffers, unsigned *nplanes,
-					 unsigned sizes[],
-					 struct device *alloc_devs[])
-{
-	struct virtio_camera_stream *stream = vb2_get_drv_priv(vq);
-	unsigned int i;
-	unsigned fmt_nplanes = stream->pix_format.num_planes;
-
-	if (*nplanes) {
-		if (*nplanes != fmt_nplanes)
-			return -EINVAL;
-
-		for (i = 0; i < fmt_nplanes; ++i) {
-			if (sizes[i] <
-				    stream->pix_format.plane_fmt[i].sizeimage ||
-			    !IS_ALIGNED(sizes[i], PAGE_SIZE))
-				return -EINVAL;
-		}
-	} else {
-		for (i = 0; i < fmt_nplanes; ++i) {
-			sizes[i] = stream->pix_format.plane_fmt[i].sizeimage;
-		}
-	}
-
-	*nplanes = fmt_nplanes;
-
-	return 0;
-}
-
-static unsigned int
-build_virtio_camera_sglist(struct virtio_camera_resource_sg_list *sgl,
-			   struct vb2_buffer *vb, unsigned int plane,
-			   bool has_iommu)
-{
-	int i;
-	struct scatterlist *sg;
-	struct sg_table *sgt = vb2_dma_sg_plane_desc(vb, plane);
-
-	for_each_sg(sgt->sgl, sg, sgt->nents, i) {
-		sgl->entries[i].addr = cpu_to_le64(
-			has_iommu ? sg_dma_address(sg) : sg_phys(sg));
-		sgl->entries[i].length =
-			cpu_to_le32(has_iommu ? sg_dma_len(sg) : sg->length);
-	}
-
-	sgl->num_entries = sgt->nents;
-
-	return VIRTIO_CAMERA_RESOURCE_SG_SIZE(sgt->nents);
-}
-
-static int virtio_camera_vb2_buf_init(struct vb2_buffer *vb)
-{
-	struct virtio_camera_stream *stream = vb2_get_drv_priv(vb->vb2_queue);
-	struct virtio_camera_device *vcd = video_get_drvdata(stream->video_dev);
-	struct virtio_camera_resource_sg_list *sg_list;
-	struct virtio_camera_buffer *vb_buf =
-		(struct virtio_camera_buffer *)to_vb2_v4l2_buffer(vb);
-	void *buf;
-	size_t offset = 0;
-	size_t buf_size = 0;
-	unsigned int i;
-	int ret;
-	uint32_t resource_id;
-
-	for (i = 0; i < vb->num_planes; i++) {
-		buf_size += VIRTIO_CAMERA_RESOURCE_SG_SIZE(
-			vb2_dma_sg_plane_desc(vb, i)->nents);
-	}
-
-	buf = kcalloc(1, buf_size, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	for (i = 0; i < vb->num_planes; ++i) {
-		sg_list = buf + offset;
-		offset += build_virtio_camera_sglist(sg_list, vb, i,
-						     vcd->has_iommu);
-	}
-
-	virtio_camera_resource_id_get(vcd, &resource_id);
-
-	ret = virtio_camera_cmd_resource_create(vcd, stream, buf, buf_size,
-						resource_id);
-	if (ret >= 0) {
-		vb_buf->resource_id = resource_id;
-		vb_buf->vb.field = V4L2_FIELD_NONE;
-		ret = 0;
-	} else {
-		v4l2_err(&vcd->v4l2_dev, "failed to create resource");
-		virtio_camera_resource_id_put(vcd, resource_id);
-	}
-
-	kfree(buf);
-
-	return ret;
-}
-
-static void virtio_camera_vb2_buf_cleanup(struct vb2_buffer *vb)
-{
-	struct virtio_camera_stream *stream = vb2_get_drv_priv(vb->vb2_queue);
-	struct virtio_camera_device *vcd = video_get_drvdata(stream->video_dev);
-	struct virtio_camera_buffer *vb_buf =
-		(struct virtio_camera_buffer *)to_vb2_v4l2_buffer(vb);
-
-	virtio_camera_resource_id_put(vcd, vb_buf->resource_id);
-}
-
-static void virtio_camera_vb2_buf_queue(struct vb2_buffer *vb)
-{
-	struct virtio_camera_stream *stream = vb2_get_drv_priv(vb->vb2_queue);
-	struct virtio_camera_device *vcd = video_get_drvdata(stream->video_dev);
-	struct virtio_camera_buffer *vb_buf =
-		(struct virtio_camera_buffer *)to_vb2_v4l2_buffer(vb);
-	int ret;
-
-	virtio_camera_vb2_queue_active_push(vcd, vb_buf);
-
-	ret = virtio_camera_cmd_resource_queue(vcd, stream, vb_buf);
-	if (ret < 0) {
-		unsigned long flags;
-		v4l2_err(&vcd->v4l2_dev, "failed to queue resource(%u)",
-			 vb_buf->resource_id);
-
-		spin_lock_irqsave(&vcd->vbq_lock, flags);
-		list_del(&vb_buf->list);
-		spin_unlock_irqrestore(&vcd->vbq_lock, flags);
-		vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
-	}
-}
-
-void virtio_camera_vb2_buf_queue_done(
-	struct virtio_camera_buffer *vb_buf,
-	enum virtio_camera_resource_queue_status status, uint64_t timestamp)
-{
-	struct vb2_v4l2_buffer *v4l2_vb = &vb_buf->vb;
-	struct vb2_buffer *vb = &v4l2_vb->vb2_buf;
-	struct vb2_queue *q = vb->vb2_queue;
-	struct virtio_camera_stream *stream = vb2_get_drv_priv(q);
-	struct virtio_camera_device *vcd = video_get_drvdata(stream->video_dev);
-	enum vb2_buffer_state state;
-	unsigned int i;
-	unsigned long flags;
-
-	spin_lock_irqsave(&vcd->vbq_lock, flags);
-	if (list_empty(&vcd->vbq_active)) {
-		spin_unlock_irqrestore(&vcd->vbq_lock, flags);
-		return;
-	}
-	list_del(&vb_buf->list);
-	spin_unlock_irqrestore(&vcd->vbq_lock, flags);
-
-	switch (status) {
-	case VIRTIO_CAMERA_RESOURCE_QUEUE_OK:
-		state = VB2_BUF_STATE_DONE;
-		for (i = 0; i < vb->num_planes; ++i) {
-			vb->planes[i].bytesused =
-				stream->pix_format.plane_fmt[i].sizeimage;
-		}
-		vb->timestamp = ktime_get_ns();
-		break;
-	case VIRTIO_CAMERA_RESOURCE_QUEUE_ERR:
-	default:
-		state = VB2_BUF_STATE_ERROR;
-		for (i = 0; i < vb->num_planes; ++i) {
-			vb->planes[i].bytesused = 0;
-		}
-		break;
-	}
-
-	vb2_buffer_done(vb, state);
-}
-
-static void virtio_camera_vb2_stop_streaming(struct vb2_queue *q)
-{
-	struct virtio_camera_stream *stream = vb2_get_drv_priv(q);
-	struct virtio_camera_device *vcd = video_get_drvdata(stream->video_dev);
-
-	if (virtio_camera_cmd_resource_destroy(vcd, stream) < 0)
-		v4l2_err(&vcd->v4l2_dev, "failed to destroy resources");
-
-	virtio_camera_vb2_cancel_bufs(vcd);
-}
-
-static const struct vb2_ops virtio_camera_vb2_ops = {
-	.queue_setup = virtio_camera_vb2_queue_setup,
-	.buf_init = virtio_camera_vb2_buf_init,
-	.buf_cleanup = virtio_camera_vb2_buf_cleanup,
-	.buf_queue = virtio_camera_vb2_buf_queue,
-	.stop_streaming = virtio_camera_vb2_stop_streaming,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
-};
-
-int virtio_camera_vb2_queue_init(struct virtio_camera_device *vcd,
-				 struct virtio_camera_stream *stream)
-{
-	struct vb2_queue *q = &vcd->vb_q;
-
-	if (vcd->mplane_api)
-		q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-	else
-		q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
-	q->io_modes = VB2_MMAP | VB2_DMABUF;
-	q->drv_priv = stream;
-	q->buf_struct_size = sizeof(struct virtio_camera_buffer);
-	q->ops = &virtio_camera_vb2_ops;
-	q->mem_ops = &vb2_dma_sg_memops;
-	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-	q->min_queued_buffers = vcd->camera_sensor.min_buf_needed;
-#else
-	q->min_buffers_needed = vcd->camera_sensor.min_buf_needed;
-#endif
-	q->lock = &vcd->video_dev_mutex;
-	q->dev = vcd->v4l2_dev.dev;
-	q->gfp_flags = GFP_DMA;
-
-	return vb2_queue_init(q);
-}
-
-void virtio_camera_vb2_queue_deinit(struct virtio_camera_device *vcd)
-{
-	vb2_queue_release(&vcd->vb_q);
-	vcd->video_dev.queue->owner = NULL;
-}
