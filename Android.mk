@@ -2,6 +2,8 @@
 
 LOCAL_PATH := $(call my-dir)
 
+ifeq ($(ENABLE_VENDOR_CUTTLEFISH), true)
+
 KBUILD_OPTIONS := MODNAME=virtio_camera
 KBUILD_OPTIONS += BOARD_PLATFORM=$(TARGET_BOARD_PLATFORM)
 
@@ -22,3 +24,5 @@ LOCAL_MODULE_PATH         := $(KERNEL_MODULES_OUT)
 
 include $(DLKM_DIR)/Build_external_kernelmodule.mk
 
+
+endif # ENABLE_VENDOR_CUTTLEFISH
