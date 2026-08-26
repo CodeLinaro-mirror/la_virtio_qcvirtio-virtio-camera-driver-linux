@@ -518,8 +518,13 @@ void viocam_vb2_buf_queue_done(struct viocam_buffer *buf,
 			       enum vb2_buffer_state state)
 {
 	struct vb2_buffer *vb = &buf->vb.vb2_buf;
+	unsigned int i;
 
 	vb->timestamp = ktime_get_ns();
+	if (state == VB2_BUF_STATE_DONE) {
+		for (i = 0; i < vb->num_planes; i++)
+			vb2_set_plane_payload(vb, i, vb->planes[i].length);
+	}
 	vb2_buffer_done(vb, state);
 }
 
