@@ -613,7 +613,6 @@ int virtio_camera_cmd_resource_create(struct viocam_device *vcd,
 {
 	struct virtio_camera_resource_sg_list *sg_list;
 	int ret;
-	size_t offset = 0;
 	unsigned int i;
 	size_t req_size = calculate_resource_create_req_size(&buf->vb.vb2_buf);
 	VIOCAM_MSG_DEFINE_WREQ(hdl, struct virtio_camera_resource_create,
@@ -625,9 +624,9 @@ int virtio_camera_cmd_resource_create(struct viocam_device *vcd,
 
 	sg_list = ((void *)VIOCAM_MSG_REQ(hdl)) + sizeof(*VIOCAM_MSG_REQ(hdl));
 	for (i = 0; i < buf->vb.vb2_buf.num_planes; ++i) {
-		offset += build_virtio_camera_sglist(sg_list, &buf->vb.vb2_buf,
+		sg_list = (void *)sg_list +
+			  build_virtio_camera_sglist(sg_list, &buf->vb.vb2_buf,
 						     i, vcd->has_iommu);
-		sg_list = ((void *)sg_list) + offset;
 	}
 	VIOCAM_MSG_REQ(hdl)->stream_id = 0;
 	VIOCAM_MSG_REQ(hdl)->resource_id = cpu_to_le32(resource_id);
