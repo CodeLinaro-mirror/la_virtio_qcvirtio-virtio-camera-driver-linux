@@ -389,7 +389,12 @@ static int viocam_device_open(struct file *file)
 	mutex_lock(video_dev->lock);
 	v4l2_fh_init(&vfh->fh, video_dev);
 	file->private_data = &vfh->fh;
+
+#if KERNEL_VERSION(6, 18, 0) <= LINUX_VERSION_CODE
+	v4l2_fh_add(&vfh->fh, file);
+#else
 	v4l2_fh_add(&vfh->fh);
+#endif
 	mutex_unlock(video_dev->lock);
 
 	return 0;
@@ -510,8 +515,10 @@ static const struct vb2_ops viocam_vb2_ops = {
 	.buf_cleanup = viocam_vb2_buf_cleanup,
 	.buf_queue = viocam_vb2_buf_queue,
 	.stop_streaming = viocam_vb2_stop_streaming,
+#if KERNEL_VERSION(7, 0, 0) > LINUX_VERSION_CODE
 	.wait_prepare = vb2_ops_wait_prepare,
 	.wait_finish = vb2_ops_wait_finish,
+#endif
 };
 
 void viocam_vb2_buf_queue_done(struct viocam_buffer *buf,
