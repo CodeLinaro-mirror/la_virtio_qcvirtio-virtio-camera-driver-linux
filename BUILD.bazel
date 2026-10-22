@@ -1,0 +1,3 @@
+load(":virtio_camera.bzl", "define_target_module")
+
+define_target_module("autogvm")
